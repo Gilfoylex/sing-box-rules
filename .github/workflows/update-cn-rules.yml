@@ -1,0 +1,130 @@
+name: Update rules monthly
+
+on:
+  schedule:
+    # 每月 1 日 UTC 00:00，即北京时间 08:00。
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-release-rules
+  cancel-in-progress: false
+
+jobs:
+  update-cn-rules:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      SING_BOX_VERSION: '1.14.3'
+      CN_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.json
+      GEOLOCATION_CN_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-cn.json
+      CN_IP_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.json
+      AI_SITE_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ai-!cn.json
+      PORN_SITE_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-porn.json
+      GFW_SITE_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/gfw.json
+      APPLE_CN_SITE_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/apple@cn.json
+      MICROSOFT_CN_SITE_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/microsoft@cn.json
+      NOT_CN_SITE_URL: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-!cn.json
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="sing-box-${SING_BOX_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}" \
+            --output "${RUNNER_TEMP}/${archive}"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "$RUNNER_TEMP"
+          echo "${RUNNER_TEMP}/sing-box-${SING_BOX_VERSION}-linux-amd64" >> "$GITHUB_PATH"
+
+      - name: Download source rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cn-rules"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$CN_URL" --output "$RUNNER_TEMP/cn-rules/cn.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$GEOLOCATION_CN_URL" --output "$RUNNER_TEMP/cn-rules/geolocation-cn.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$CN_IP_URL" --output "$RUNNER_TEMP/cn-rules/cn-ip.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$AI_SITE_URL" --output "$RUNNER_TEMP/cn-rules/ai-site.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$PORN_SITE_URL" --output "$RUNNER_TEMP/cn-rules/porn-site.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$GFW_SITE_URL" --output "$RUNNER_TEMP/cn-rules/gfw-site.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$APPLE_CN_SITE_URL" --output "$RUNNER_TEMP/cn-rules/apple-cn-site.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$MICROSOFT_CN_SITE_URL" --output "$RUNNER_TEMP/cn-rules/microsoft-cn-site.json"
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 120 \
+            "$NOT_CN_SITE_URL" --output "$RUNNER_TEMP/cn-rules/not-cn-site.json"
+          for file in cn.json geolocation-cn.json cn-ip.json ai-site.json porn-site.json gfw-site.json apple-cn-site.json microsoft-cn-site.json not-cn-site.json; do
+            jq --exit-status '
+              (.version | type == "number") and
+              (.rules | type == "array" and length > 0)
+            ' "$RUNNER_TEMP/cn-rules/$file" > /dev/null
+          done
+
+      - name: Merge and compile rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          sing-box version
+          sing-box rule-set merge "$RUNNER_TEMP/cn-rules/cn-site.json" \
+            --config "$RUNNER_TEMP/cn-rules/cn.json" \
+            --config "$RUNNER_TEMP/cn-rules/geolocation-cn.json"
+          for name in cn-site cn-ip ai-site porn-site gfw-site apple-cn-site microsoft-cn-site not-cn-site; do
+            sing-box rule-set compile \
+              --output "$RUNNER_TEMP/cn-rules/$name.srs" \
+              "$RUNNER_TEMP/cn-rules/$name.json"
+            test -s "$RUNNER_TEMP/cn-rules/$name.json"
+            test -s "$RUNNER_TEMP/cn-rules/$name.srs"
+          done
+
+      - name: Publish to release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin refs/heads/release > /dev/null; then
+            git fetch --depth=1 origin refs/heads/release
+            git checkout -B release FETCH_HEAD
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              exit "$status"
+            fi
+            # 首次创建产物分支，移除 runner 中检出的源码文件。
+            git checkout --orphan release
+            git rm -rf --ignore-unmatch .
+          fi
+          cp "$RUNNER_TEMP/cn-rules/cn-site.json" "$RUNNER_TEMP/cn-rules/cn-site.srs" \
+            "$RUNNER_TEMP/cn-rules/cn-ip.json" "$RUNNER_TEMP/cn-rules/cn-ip.srs" \
+            "$RUNNER_TEMP/cn-rules/ai-site.json" "$RUNNER_TEMP/cn-rules/ai-site.srs" \
+            "$RUNNER_TEMP/cn-rules/porn-site.json" "$RUNNER_TEMP/cn-rules/porn-site.srs" \
+            "$RUNNER_TEMP/cn-rules/gfw-site.json" "$RUNNER_TEMP/cn-rules/gfw-site.srs" \
+            "$RUNNER_TEMP/cn-rules/apple-cn-site.json" "$RUNNER_TEMP/cn-rules/apple-cn-site.srs" \
+            "$RUNNER_TEMP/cn-rules/microsoft-cn-site.json" "$RUNNER_TEMP/cn-rules/microsoft-cn-site.srs" \
+            "$RUNNER_TEMP/cn-rules/not-cn-site.json" "$RUNNER_TEMP/cn-rules/not-cn-site.srs" .
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add cn-site.json cn-site.srs cn-ip.json cn-ip.srs \
+            ai-site.json ai-site.srs porn-site.json porn-site.srs gfw-site.json gfw-site.srs \
+            apple-cn-site.json apple-cn-site.srs microsoft-cn-site.json microsoft-cn-site.srs \
+            not-cn-site.json not-cn-site.srs
+          if git diff --cached --quiet; then
+            echo '规则没有变化，无需提交。'
+            exit 0
+          fi
+          git commit -m 'chore: update rule sets'
+          git push origin HEAD:refs/heads/release
